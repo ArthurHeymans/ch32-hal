@@ -30,10 +30,11 @@ embedded-hal-async = "1.0.0"
 critical-section = { version = "1.2.0" }
 defmt = { version = "0.3.8", optional = true }
 
-embassy-sync = { version = "0.6.0" }
+embassy-sync = { version = "0.6.2" }
 embassy-futures = { version = "0.1.1" }
-embassy-time-driver = { version = "0.1.0", optional = true }
-embassy-time = { version = "0.3.2", optional = true }
+embassy-time-driver = { version = "0.2.0", optional = true }
+embassy-time-queue-utils = { version = "0.1.0", optional = true }
+embassy-time = { version = "0.4.0", optional = true }
 embassy-usb-driver = "0.1.0"
 
 nb = "1.1.0"
@@ -61,6 +62,7 @@ highcode = ["qingke-rt/highcode"]
 embassy = [
     "dep:embassy-time-driver",
     "dep:embassy-time",
+    "dep:embassy-time-queue-utils"
 ]
 defmt = ["dep:defmt"]
 memory-x = ["ch32-metapac/memory-x"]

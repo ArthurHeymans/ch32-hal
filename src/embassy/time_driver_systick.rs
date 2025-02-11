@@ -1,11 +1,15 @@
 //! SysTick-based time driver.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use core::{mem, ptr};
+use critical_section::Mutex as CsMutex;
+
+static SYSTICK_WAKER: CsMutex<RefCell<Option<core::task::Waker>>> =
+    CsMutex::new(RefCell::new(None));
 
 use critical_section::{CriticalSection, Mutex};
-use embassy_time_driver::{AlarmHandle, Driver};
+use embassy_time_driver::Driver;
 use pac::systick::vals;
 use qingke::interrupt::Priority;
 use qingke_rt::interrupt;
@@ -16,11 +20,6 @@ pub const ALARM_COUNT: usize = 1;
 
 struct AlarmState {
     timestamp: Cell<u64>,
-
-    // This is really a Option<(fn(*mut ()), *mut ())>
-    // but fn pointers aren't allowed in const yet
-    callback: Cell<*const ()>,
-    ctx: Cell<*mut ()>,
 }
 
 unsafe impl Send for AlarmState {}
@@ -29,8 +28,6 @@ impl AlarmState {
     const fn new() -> Self {
         Self {
             timestamp: Cell::new(u64::MAX),
-            callback: Cell::new(ptr::null()),
-            ctx: Cell::new(ptr::null_mut()),
         }
     }
 }
@@ -96,23 +93,12 @@ impl SystickDriver {
     }
 
     fn trigger_alarm(&self, cs: CriticalSection) {
-        let alarm = &self.alarms.borrow(cs)[0];
-        alarm.timestamp.set(u64::MAX);
-
-        // Call after clearing alarm, so the callback can set another alarm.
-
-        // safety:
-        // - we can ignore the possiblity of `f` being unset (null) because of the safety contract of `allocate_alarm`.
-        // - other than that we only store valid function pointers into alarm.callback
-        let f: fn(*mut ()) = unsafe { mem::transmute(alarm.callback.get()) };
-        f(alarm.ctx.get());
+        self.alarms.borrow(cs)[0].timestamp.set(u64::MAX);
+        if let Some(w) = SYSTICK_WAKER.borrow(cs).take() {
+            w.wake();
+        }
     }
 
-    fn get_alarm<'a>(&'a self, cs: CriticalSection<'a>, alarm: AlarmHandle) -> &'a AlarmState {
-        // safety: we're allowed to assume the AlarmState is created by us, and
-        // we never create one that's out of bounds.
-        unsafe { self.alarms.borrow(cs).get_unchecked(alarm.id() as usize) }
-    }
 
     #[inline]
     fn raw_cnt(&self) -> u64 {
@@ -128,56 +114,22 @@ impl Driver for SystickDriver {
         rb.cnt().read() / period
     }
 
-    unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
-        let id = critical_section::with(|_| {
-            let x = self.alarm_count.load(Ordering::Acquire);
-            if x < ALARM_COUNT as u8 {
-                self.alarm_count.store(x + 1, Ordering::Release);
-                Some(x)
-            } else {
-                None
-            }
-        });
-
-        id.map(|id| AlarmHandle::new(id))
-    }
-
-    fn set_alarm_callback(&self, alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut ()) {
+    fn schedule_wake(&self, at: u64, waker: &core::task::Waker) {
         critical_section::with(|cs| {
-            let alarm = self.get_alarm(cs, alarm);
-
-            alarm.callback.set(callback as *const ());
-            alarm.ctx.set(ctx);
-        })
-    }
-
-    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
-        critical_section::with(|cs| {
+            // Store (a clone of) the provided waker in our module-local variable.
+            SYSTICK_WAKER.borrow(cs).replace(Some(waker.clone()));
+            // Use the alarm at index 0 (the only one)
+            self.alarms.borrow(cs)[0].timestamp.set(at);
             let rb = &crate::pac::SYSTICK;
-
-            let _n = alarm.id();
-
-            let alarm = self.get_alarm(cs, alarm);
-            alarm.timestamp.set(timestamp);
-
-            let period = self.period.load(Ordering::Relaxed) as u64;
-
-            // See-also: https://github.com/ch32-rs/ch32-hal/issues/4
-            let t = self.raw_cnt();
-            let timestamp = timestamp * period;
-            if timestamp <= t {
-                // If alarm timestamp has passed the alarm will not fire.
-                // Disarm the alarm and return `false` to indicate that.
-
-                alarm.timestamp.set(u64::MAX);
-
-                return false;
-            }
-
+            // Ensure the SysTick interrupt is enabled
             rb.ctlr().modify(|w| w.set_stie(true));
-
-            true
-        })
+            // Calculate the compare register value from the new target timestamp
+            let period = self.period.load(Ordering::Relaxed) as u64;
+            let t = self.raw_cnt();
+            // Use the smaller of (at * period) or (t + period)
+            let cmp_val = u64::min(at * period, t.wrapping_add(period));
+            rb.cmp().write_value(cmp_val + 1);
+        });
     }
 }
 
