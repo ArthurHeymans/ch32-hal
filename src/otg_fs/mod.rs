@@ -103,7 +103,7 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
 pub struct Driver<'d, T: Instance, const NR_EP: usize> {
     phantom: PhantomData<&'d mut T>,
     allocator: EndpointBufferAllocator<'d, NR_EP>,
-    next_ep_addr: u8,
+    allocated: [bool; MAX_NR_EP],
 }
 
 impl<'d, T, const NR_EP: usize> Driver<'d, T, NR_EP>
@@ -131,35 +131,65 @@ where
         Self {
             phantom: PhantomData,
             allocator,
-            // 0 is reserved for the control endpoint
-            next_ep_addr: 1,
+            allocated: [false; MAX_NR_EP],
         }
     }
 
-    fn alloc_ep_address(&mut self) -> u8 {
-        if self.next_ep_addr as usize >= MAX_NR_EP {
-            panic!("ep addr overflow")
-        }
-
-        let addr = self.next_ep_addr;
-        self.next_ep_addr += 1;
-        addr
+    fn find_free_ep_address(&self, _dir: Direction) -> Result<u8, embassy_usb_driver::EndpointAllocError> {
+        self.allocated
+            .iter()
+            .enumerate()
+            .skip(1) // Skip index 0 which is reserved for control endpoint
+            .find(|(_, &allocated)| !allocated)
+            .map(|(i, _)| i as u8)
+            .ok_or(embassy_usb_driver::EndpointAllocError)
     }
 
     fn alloc_endpoint<D: Dir>(
         &mut self,
         ep_type: EndpointType,
+        ep_addr: Option<EndpointAddress>,
         max_packet_size: u16,
         interval_ms: u8,
         dir: Direction,
     ) -> Result<Endpoint<'d, T, D>, embassy_usb_driver::EndpointAllocError> {
-        let ep_addr = self.alloc_ep_address();
+        let addr = match ep_addr {
+            Some(addr) => {
+                // Use the provided endpoint address
+                if addr.direction() != dir {
+                    return Err(embassy_usb_driver::EndpointAllocError);
+                }
+
+                let ep_num = addr.index();
+                if ep_num >= MAX_NR_EP {
+                    return Err(embassy_usb_driver::EndpointAllocError);
+                }
+
+                // Check if this endpoint is already allocated
+                if self.allocated[ep_num] {
+                    return Err(embassy_usb_driver::EndpointAllocError);
+                }
+
+                self.allocated[ep_num] = true;
+                addr
+            }
+            None => {
+                // Find a free endpoint address
+                let ep_addr = self.find_free_ep_address(dir)?;
+                let addr = EndpointAddress::from_parts(ep_addr as usize, dir);
+
+                // Mark as allocated
+                self.allocated[ep_addr as usize] = true;
+
+                addr
+            }
+        };
+
         let data = self.allocator.alloc_endpoint(max_packet_size)?;
 
         Ok(Endpoint::new(
             EndpointInfo {
-                // todo fix in embassy usb driver ep_addr should be u8 with top bit unset
-                addr: EndpointAddress::from_parts(ep_addr as usize, dir),
+                addr,
                 ep_type,
                 max_packet_size,
                 interval_ms,
@@ -181,19 +211,21 @@ impl<'d, T: Instance, const NR_EP: usize> embassy_usb_driver::Driver<'d> for Dri
     fn alloc_endpoint_out(
         &mut self,
         ep_type: embassy_usb_driver::EndpointType,
+        ep_addr: Option<EndpointAddress>,
         max_packet_size: u16,
         interval_ms: u8,
     ) -> Result<Self::EndpointOut, embassy_usb_driver::EndpointAllocError> {
-        self.alloc_endpoint(ep_type, max_packet_size, interval_ms, Direction::Out)
+        self.alloc_endpoint(ep_type, ep_addr, max_packet_size, interval_ms, Direction::Out)
     }
 
     fn alloc_endpoint_in(
         &mut self,
         ep_type: embassy_usb_driver::EndpointType,
+        ep_addr: Option<EndpointAddress>,
         max_packet_size: u16,
         interval_ms: u8,
     ) -> Result<Self::EndpointIn, embassy_usb_driver::EndpointAllocError> {
-        self.alloc_endpoint(ep_type, max_packet_size, interval_ms, Direction::In)
+        self.alloc_endpoint(ep_type, ep_addr, max_packet_size, interval_ms, Direction::In)
     }
 
     fn start(mut self, control_max_packet_size: u16) -> (Self::Bus, Self::ControlPipe) {
