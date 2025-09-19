@@ -199,7 +199,7 @@ impl RtcDriver {
         <T as GeneralInstance16bit>::CaptureCompareInterrupt::unpend();
         unsafe { <T as GeneralInstance16bit>::CaptureCompareInterrupt::enable() };
 
-        r.ctlr1().modify(|w| w.set_cen(true));//Counter enable
+        r.ctlr1().modify(|w| w.set_cen(true)); //Counter enable
     }
 
     fn on_interrupt(&self) {
@@ -216,16 +216,19 @@ impl RtcDriver {
             r.intfr().write_value(regs::Intfr(!sr.0));
 
             // Overflow
-            if sr.uif() { // Update interrupt flag
+            if sr.uif() {
+                // Update interrupt flag
                 self.next_period();
             }
 
             // Half overflow
-            if sr.ccif(0) { // Capture/compare 1 interrupt flag
+            if sr.ccif(0) {
+                // Capture/compare 1 interrupt flag
                 self.next_period();
             }
 
-            if sr.ccif(1) && dier.ccie(1) { // Capture/compare 1 interrupt flag & Capture/Compare 1 interrupt enable
+            if sr.ccif(1) && dier.ccie(1) {
+                // Capture/compare 1 interrupt flag & Capture/Compare 1 interrupt enable
                 self.trigger_alarm(cs);
             }
         })
