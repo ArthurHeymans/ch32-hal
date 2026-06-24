@@ -398,7 +398,23 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
                 T::dregs().ep_config().modify(|v| v.set_r_en(index - 1, enabled));
                 T::dregs().ep_rx_ctrl(index).write(|v| {
                     v.set_mask_uep_r_tog(EpTog::DATA0);
-                    v.set_mask_uep_r_res(EpRxResponse::NAK);
+                    // Make OUT endpoints ready as soon as the selected
+                    // configuration enables them. Embassy drivers such as RP2040
+                    // mark OUT buffers available in endpoint_set_enabled(), and
+                    // hosts may send the first OUT packet immediately after the
+                    // SET_CONFIGURATION status stage.
+                    //
+                    // Arming early is safe even before the class task calls
+                    // read(): with RB_UC_INT_BUSY set (see Driver::new), the
+                    // SIE auto-responds NAK while UIF_TRANSFER is pending, so
+                    // the DMA buffer cannot be overwritten until data_out()
+                    // consumes the packet and clears the flag.
+                    // See CH32FV2x_V3xRM R8_USB_CTRL.RB_UC_INT_BUSY.
+                    v.set_mask_uep_r_res(if enabled {
+                        EpRxResponse::ACK
+                    } else {
+                        EpRxResponse::NAK
+                    });
                     v.set_r_tog_auto(false);
                 });
             }
